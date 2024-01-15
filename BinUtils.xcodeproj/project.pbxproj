@@ -102,7 +102,7 @@
 				__PBXFileRef_Sources/BinUtils.swift /* BinUtils.swift */,
 			);
 			name = BinUtils;
-			path = Sources;
+			path = Sources/BinUtils;
 			sourceTree = "<group>";
 		};
 		"_______Group_BinUtilsTests" /* BinUtilsTests */ = {
