@@ -35,6 +35,22 @@ class BinUtilsTests: XCTestCase {
         XCTAssertEqual(s1.lowercased(), s2)
     }
 
+    func testUnhexlifyOddLengthReturnsNil() {
+        XCTAssertNil(unhexlify("ABC"))
+    }
+
+    func testPackStringBigEndian() {
+        // strings are raw bytes and must not be reversed by the byte order
+        let data = pack(">2s", ["as"])
+        XCTAssertEqual(data, unhexlify("6173"))
+    }
+
+    func testPackUnpackStringBigEndian() {
+        let data = pack(">3s", ["abc"])
+        let a = try! unpack(">3s", data)
+        XCTAssertEqual(a[0] as? NSString, "abc")
+    }
+
     func testUnpackWithFile() {
         let path = "/bin/ls"
         if let f = FileHandle(forReadingAtPath: path) {
@@ -154,7 +170,10 @@ extension BinUtilsTests {
     {
         return [
             ("testUnhexlify", testUnhexlify),
+            ("testUnhexlifyOddLengthReturnsNil", testUnhexlifyOddLengthReturnsNil),
             ("testHexlifyUnhexlify", testHexlifyUnhexlify),
+            ("testPackStringBigEndian", testPackStringBigEndian),
+            ("testPackUnpackStringBigEndian", testPackUnpackStringBigEndian),
             ("testUnpack1", testUnpack1),
             ("testUnpack2", testUnpack2),
             ("testUnpack3", testUnpack3),

@@ -98,6 +98,11 @@ public func unhexlify(_ string:String) -> Data? {
 
     let s = string.uppercased().replacingOccurrences(of: " ", with: "")
 
+    if s.count % 2 != 0 {
+        print("-- odd-length string")
+        return nil
+    }
+
     let nonHexCharacterSet = CharacterSet(charactersIn: "0123456789ABCDEF").inverted
     if let range = s.rangeOfCharacter(from: nonHexCharacterSet) {
         print("-- found non hex character at range \(range)")
@@ -275,7 +280,8 @@ public func pack(_ format:String, _ objects:[Any], _ stringEncoding:String.Encod
 
             assert(bytes.count == expectedSize)
 
-            if isBigEndian { bytes = bytes.reversed() }
+            // strings ('s') are raw byte sequences and are NOT affected by
+            // the byte-order specifier, matching Python's struct module
 
             mutableData.append(bytes, count: bytes.count)
 
