@@ -16,6 +16,7 @@ public protocol Unpackable {}
 extension NSString: Unpackable {}
 extension Bool: Unpackable {}
 extension Int: Unpackable {}
+extension UInt: Unpackable {}
 extension Double: Unpackable {}
 
 // MARK: protocol DataConvertible
@@ -58,7 +59,10 @@ extension Float64 : DataConvertible { }
 // MARK: String extension
 
 extension String {
-    subscript (from:Int, to:Int) -> String {
+    // NOTE: uses UTF-16 (NSRange) semantics, so the indices are only meaningful
+    // for ASCII content. It is file-private because it is solely a helper for
+    // unhexlify(), which operates on validated hexadecimal (ASCII) strings.
+    fileprivate subscript (from:Int, to:Int) -> String {
         return NSString(string: self).substring(with: NSMakeRange(from, to-from))
     }
 }
@@ -78,17 +82,7 @@ public func hexlify(_ data:Data) -> String {
     // similar to hexlify() in Python's binascii module
     // https://docs.python.org/2/library/binascii.html
 
-    var s = String()
-    
-    let nsData = data as NSData
-    var bytes = [UInt8](repeating: 0, count: data.count)
-    nsData.getBytes(&bytes, length: data.count)
-
-    for byte in bytes {
-        s = s.appendingFormat("%02x", byte)
-    }
-
-    return s as String
+    return data.map { String(format: "%02x", $0) }.joined()
 }
 
 public func unhexlify(_ string:String) -> Data? {
@@ -118,6 +112,16 @@ public func unhexlify(_ string:String) -> Data? {
     }
 
     return data
+}
+
+// If `c` is a decimal digit, accumulate it into the repeat counter `n` and
+// return true; otherwise leave `n` untouched and return false. Shared by
+// numberOfBytesInFormat(), pack() and unpack() so the parsing stays in sync.
+func parseRepeatCountDigit(_ c:Character, into n:inout Int) -> Bool {
+    guard let i = Int(String(c)), 0...9 ~= i else { return false }
+    if n > 0 { n *= 10 }
+    n += i
+    return true
 }
 
 func readIntegerType<T:DataConvertible>(_ type:T.Type, bytes:[UInt8], loc:inout Int) -> T {
@@ -165,11 +169,7 @@ func numberOfBytesInFormat(_ format:String) -> Int {
 
         let c = mutableFormat.remove(at: mutableFormat.startIndex)
 
-        if let i = Int(String(c)) , 0...9 ~= i {
-            if n > 0 { n *= 10 }
-            n += i
-            continue
-        }
+        if parseRepeatCountDigit(c, into:&n) { continue }
 
         if c == "s" {
             numberOfBytes += max(n,1)
@@ -225,9 +225,34 @@ func formatDoesMatchDataLength(_ format:String, data:Data) -> Bool {
 public enum BinUtilsError: Error {
     case formatDoesMatchDataLength(format:String, dataSize:Int)
     case unsupportedFormat(character:Character)
+    case emptyFormat
+    case invalidByteOrder(character:Character)
+    case missingObject(format:Character)
+    case wrongObjectType(format:Character)
+    case stringEncodingError(string:String, encoding:String.Encoding)
 }
 
-public func pack(_ format:String, _ objects:[Any], _ stringEncoding:String.Encoding=String.Encoding.windowsCP1252) -> Data {
+// 'Q' (unsigned long long) accepts either an Int or a UInt object so that the
+// full UInt64 range can be packed and round-trips with unpack()
+func uint64Value(_ o:Any, _ c:Character) throws -> UInt64 {
+    if let u = o as? UInt { return UInt64(u) }
+    guard let i = o as? Int else { throw BinUtilsError.wrongObjectType(format:c) }
+    return UInt64(truncatingIfNeeded:i)
+}
+
+func intObject(_ o:Any, _ c:Character) throws -> Int {
+    guard let i = o as? Int else { throw BinUtilsError.wrongObjectType(format:c) }
+    return i
+}
+
+func doubleObject(_ o:Any, _ c:Character) throws -> Double {
+    guard let d = o as? Double else { throw BinUtilsError.wrongObjectType(format:c) }
+    return d
+}
+
+public func pack(_ format:String, _ objects:[Any], _ stringEncoding:String.Encoding=String.Encoding.windowsCP1252) throws -> Data {
+
+    assert(CFByteOrderGetCurrent() == 1 /* CFByteOrderLittleEndian */, "\(#file) assumes little endian, but host is big endian")
 
     var objectsQueue = objects
 
@@ -237,6 +262,8 @@ public func pack(_ format:String, _ objects:[Any], _ stringEncoding:String.Encod
 
     var isBigEndian = false
 
+    guard !mutableFormat.isEmpty else { throw BinUtilsError.emptyFormat }
+
     let firstCharacter = mutableFormat.remove(at: mutableFormat.startIndex)
 
     switch(firstCharacter) {
@@ -244,10 +271,8 @@ public func pack(_ format:String, _ objects:[Any], _ stringEncoding:String.Encod
         isBigEndian = false
     case ">", "!":
         isBigEndian = true
-    case "@":
-        assertionFailure("native size and alignment '@' is unsupported'")
     default:
-        assertionFailure("unsupported format chacracter'")
+        throw BinUtilsError.invalidByteOrder(character:firstCharacter)
     }
 
     var n = 0 // repeat counter
@@ -256,18 +281,18 @@ public func pack(_ format:String, _ objects:[Any], _ stringEncoding:String.Encod
 
         let c = mutableFormat.remove(at: mutableFormat.startIndex)
 
-        if let i = Int(String(c)) , 0...9 ~= i {
-            if n > 0 { n *= 10 }
-            n += i
-            continue
-        }
+        if parseRepeatCountDigit(c, into:&n) { continue }
 
         var o : Any = 0
 
         if c == "s" {
-            o = objectsQueue.remove(at: 0)
+            guard !objectsQueue.isEmpty else { throw BinUtilsError.missingObject(format:c) }
+            o = objectsQueue.removeFirst()
 
-            guard let stringData = (o as! String).data(using: .utf8) else { assertionFailure(); return Data() }
+            guard let s = o as? String else { throw BinUtilsError.wrongObjectType(format:c) }
+            guard let stringData = s.data(using: stringEncoding) else {
+                throw BinUtilsError.stringEncodingError(string:s, encoding:stringEncoding)
+            }
             var bytes = stringData.bytes
 
             let expectedSize = max(1, n)
@@ -294,41 +319,45 @@ public func pack(_ format:String, _ objects:[Any], _ stringEncoding:String.Encod
             var bytes : [UInt8] = []
 
             if c != "x" {
+                guard !objectsQueue.isEmpty else { throw BinUtilsError.missingObject(format:c) }
                 o = objectsQueue.removeFirst()
             }
 
             switch(c) {
             case "?":
-                bytes = (o as! Bool) ? [0x01] : [0x00]
+                guard let b = o as? Bool else { throw BinUtilsError.wrongObjectType(format:c) }
+                bytes = b ? [0x01] : [0x00]
             case "c":
-                let charAsString = (o as! NSString).substring(to: 1)
+                guard let ns = o as? NSString else { throw BinUtilsError.wrongObjectType(format:c) }
+                let charAsString = ns.substring(to: 1)
                 guard let data = charAsString.data(using: stringEncoding) else {
-                    assertionFailure("cannot decode character \(charAsString) using encoding \(stringEncoding)")
-                    return Data()
+                    throw BinUtilsError.stringEncodingError(string:charAsString, encoding:stringEncoding)
                 }
                 bytes = data.bytes
             case "b":
-                bytes = Int8(truncatingIfNeeded:o as! Int).data.bytes
+                bytes = Int8(truncatingIfNeeded:try intObject(o, c)).data.bytes
             case "h":
-                bytes = Int16(truncatingIfNeeded:o as! Int).data.bytes
+                bytes = Int16(truncatingIfNeeded:try intObject(o, c)).data.bytes
             case "i", "l":
-                bytes = Int32(truncatingIfNeeded:o as! Int).data.bytes
-            case "q", "Q":
-                bytes = Int64(o as! Int).data.bytes
+                bytes = Int32(truncatingIfNeeded:try intObject(o, c)).data.bytes
+            case "q":
+                bytes = Int64(truncatingIfNeeded:try intObject(o, c)).data.bytes
+            case "Q":
+                bytes = try uint64Value(o, c).data.bytes
             case "B":
-                bytes = UInt8(truncatingIfNeeded:o as! Int).data.bytes
+                bytes = UInt8(truncatingIfNeeded:try intObject(o, c)).data.bytes
             case "H":
-                bytes = UInt16(truncatingIfNeeded:o as! Int).data.bytes
+                bytes = UInt16(truncatingIfNeeded:try intObject(o, c)).data.bytes
             case "I", "L":
-                bytes = UInt32(truncatingIfNeeded:o as! Int).data.bytes
+                bytes = UInt32(truncatingIfNeeded:try intObject(o, c)).data.bytes
             case "f":
-                bytes = Float32(o as! Double).data.bytes
+                bytes = Float32(try doubleObject(o, c)).data.bytes
             case "d":
-                bytes = Float64(o as! Double).data.bytes
+                bytes = Float64(try doubleObject(o, c)).data.bytes
             case "x":
                 bytes = [0x00]
             default:
-                assertionFailure("Unsupported packing format: \(c)")
+                throw BinUtilsError.unsupportedFormat(character:c)
             }
 
             if isBigEndian { bytes = bytes.reversed() }
@@ -368,11 +397,7 @@ public func unpack(_ format:String, _ data:Data, _ stringEncoding:String.Encodin
 
         let c = mutableFormat.remove(at: mutableFormat.startIndex)
 
-        if let i = Int(String(c)) , 0...9 ~= i {
-            if n > 0 { n *= 10 }
-            n += i
-            continue
-        }
+        if parseRepeatCountDigit(c, into:&n) { continue }
 
         if c == "s" {
             let length = max(n,1)
@@ -399,7 +424,7 @@ public func unpack(_ format:String, _ data:Data, _ stringEncoding:String.Encodin
             switch(c) {
 
             case "c":
-                let optionalString = NSString(bytes: [bytes[loc]], length: 1, encoding: String.Encoding.utf8.rawValue)
+                let optionalString = NSString(bytes: [bytes[loc]], length: 1, encoding: stringEncoding.rawValue)
                 loc += 1
                 guard let s = optionalString else { assertionFailure(); return [] }
                 o = s
@@ -433,7 +458,9 @@ public func unpack(_ format:String, _ data:Data, _ stringEncoding:String.Encodin
                 o = Int(isBigEndian ? Int64(bigEndian: r) : r)
             case "Q":
                 let r = readIntegerType(UInt64.self, bytes:bytes, loc:&loc)
-                o = Int(isBigEndian ? UInt64(bigEndian: r) : r)
+                // returned as UInt (not Int) so the full UInt64 range is
+                // representable without trapping for values > Int64.max
+                o = UInt(isBigEndian ? UInt64(bigEndian: r) : r)
             case "f":
                 let r = readFloatingPointType(Float32.self, bytes:bytes, loc:&loc, isBigEndian:isBigEndian)
                 o = Double(r)

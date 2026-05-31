@@ -41,14 +41,46 @@ class BinUtilsTests: XCTestCase {
 
     func testPackStringBigEndian() {
         // strings are raw bytes and must not be reversed by the byte order
-        let data = pack(">2s", ["as"])
+        let data = try! pack(">2s", ["as"])
         XCTAssertEqual(data, unhexlify("6173"))
     }
 
     func testPackUnpackStringBigEndian() {
-        let data = pack(">3s", ["abc"])
+        let data = try! pack(">3s", ["abc"])
         let a = try! unpack(">3s", data)
         XCTAssertEqual(a[0] as? NSString, "abc")
+    }
+
+    func testUnpackUnsignedLongLongMax() {
+        // UInt64.max must not trap when coerced; it is returned as a UInt
+        let a = try! unpack("<Q", unhexlify("ffffffffffffffff")!)
+        XCTAssertEqual(a[0] as? UInt, UInt.max)
+    }
+
+    func testPackUnpackUnsignedLongLong() {
+        let big = UInt.max
+        let data = try! pack("<Q", [big])
+        XCTAssertEqual(data, unhexlify("ffffffffffffffff"))
+        let a = try! unpack("<Q", data)
+        XCTAssertEqual(a[0] as? UInt, big)
+    }
+
+    func testPackStringUsesStringEncoding() {
+        // é is 0xE9 in the default Windows-1252 encoding, not UTF-8's 0xC3 0xA9
+        let data = try! pack("<1s", ["é"])
+        XCTAssertEqual(data, unhexlify("e9"))
+    }
+
+    func testPackUnpackStringEncodingRoundTrip() {
+        let data = try! pack("<1s", ["é"])
+        let a = try! unpack("<1s", data)
+        XCTAssertEqual(a[0] as? NSString, "é")
+    }
+
+    func testUnpackCharacterUsesStringEncoding() {
+        // 0xE9 is 'é' in Windows-1252 but invalid as standalone UTF-8
+        let a = try! unpack("<c", unhexlify("e9")!)
+        XCTAssertEqual(a[0] as? NSString, "é")
     }
 
     func testUnpackWithFile() {
@@ -109,53 +141,85 @@ class BinUtilsTests: XCTestCase {
     }
 
     func testPackLittleEndian() {
-        let data = pack("<Ih", [1, 2])
+        let data = try! pack("<Ih", [1, 2])
         XCTAssertEqual(data, unhexlify("01000000 0200"))
     }
 
     func testPackBigEndian() {
-        let data = pack(">Ih?", [1, 2, true])
+        let data = try! pack(">Ih?", [1, 2, true])
         XCTAssertEqual(data, unhexlify("00000001 0002 01"))
     }
 
     func testPackWithPadding() {
-        let data = pack("<xh", [123])
+        let data = try! pack("<xh", [123])
         XCTAssertEqual(data, unhexlify("007b00"))
     }
 
     func testPackWithPaddingRepeat() {
-        let data = pack("<2xh", [1])
+        let data = try! pack("<2xh", [1])
         XCTAssertEqual(data, unhexlify("00000100"))
     }
 
     func testPackWithRepeats() {
-        let data = pack("<h2I", [0, 1, 2])
+        let data = try! pack("<h2I", [0, 1, 2])
         XCTAssertEqual(data, unhexlify("0000 01000000 02000000"))
     }
 
     func testPackWithRepeatsPlusCharacter() {
-        let data = pack("<h2Ic", [0, 1, 2, "x"])
+        let data = try! pack("<h2Ic", [0, 1, 2, "x"])
         XCTAssertEqual(data, unhexlify("0000 01000000 02000000 78"))
     }
 
     func testPackString() {
-        let data = pack("<2s", ["as"])
+        let data = try! pack("<2s", ["as"])
         XCTAssertEqual(data, unhexlify("6173"))
     }
 
     func testPackString2() {
-        let data = pack("<2s2s", ["as", "df"])
+        let data = try! pack("<2s2s", ["as", "df"])
         XCTAssertEqual(data, unhexlify("6173 6466"))
     }
 
     func testPack() {
-        let data = pack("<h2I3sf", [1, 2, 3, "asd", 0.5])
+        let data = try! pack("<h2I3sf", [1, 2, 3, "asd", 0.5])
         XCTAssertEqual(data, unhexlify("0100 02000000 03000000 617364 0000003f"))
+    }
+
+    func testPackThrowsOnMissingObject() {
+        XCTAssertThrowsError(try pack("<I", [])) { error in
+            guard case BinUtilsError.missingObject = error else {
+                return XCTFail("expected missingObject, got \(error)")
+            }
+        }
+    }
+
+    func testPackThrowsOnWrongObjectType() {
+        XCTAssertThrowsError(try pack("<I", ["not an int"])) { error in
+            guard case BinUtilsError.wrongObjectType = error else {
+                return XCTFail("expected wrongObjectType, got \(error)")
+            }
+        }
+    }
+
+    func testPackThrowsOnInvalidByteOrder() {
+        XCTAssertThrowsError(try pack("@I", [1])) { error in
+            guard case BinUtilsError.invalidByteOrder = error else {
+                return XCTFail("expected invalidByteOrder, got \(error)")
+            }
+        }
+    }
+
+    func testPackThrowsOnEmptyFormat() {
+        XCTAssertThrowsError(try pack("", [])) { error in
+            guard case BinUtilsError.emptyFormat = error else {
+                return XCTFail("expected emptyFormat, got \(error)")
+            }
+        }
     }
 
     func testPackUnpackNetworkOrder() {
         // http://effbot.org/librarybook/struct.htm
-        let data = pack("!ihb", [1, 2, 3])
+        let data = try! pack("!ihb", [1, 2, 3])
         let a = try! unpack("!ihb", data)
         XCTAssertEqual(a[0] as? Int, 1)
         XCTAssertEqual(a[1] as? Int, 2)
@@ -174,6 +238,11 @@ extension BinUtilsTests {
             ("testHexlifyUnhexlify", testHexlifyUnhexlify),
             ("testPackStringBigEndian", testPackStringBigEndian),
             ("testPackUnpackStringBigEndian", testPackUnpackStringBigEndian),
+            ("testUnpackUnsignedLongLongMax", testUnpackUnsignedLongLongMax),
+            ("testPackUnpackUnsignedLongLong", testPackUnpackUnsignedLongLong),
+            ("testPackStringUsesStringEncoding", testPackStringUsesStringEncoding),
+            ("testPackUnpackStringEncodingRoundTrip", testPackUnpackStringEncodingRoundTrip),
+            ("testUnpackCharacterUsesStringEncoding", testUnpackCharacterUsesStringEncoding),
             ("testUnpack1", testUnpack1),
             ("testUnpack2", testUnpack2),
             ("testUnpack3", testUnpack3),
@@ -187,6 +256,10 @@ extension BinUtilsTests {
             ("testPackWithRepeatsPlusCharacter", testPackWithRepeatsPlusCharacter),
             ("testPackString", testPackString),
             ("testPack", testPack),
+            ("testPackThrowsOnMissingObject", testPackThrowsOnMissingObject),
+            ("testPackThrowsOnWrongObjectType", testPackThrowsOnWrongObjectType),
+            ("testPackThrowsOnInvalidByteOrder", testPackThrowsOnInvalidByteOrder),
+            ("testPackThrowsOnEmptyFormat", testPackThrowsOnEmptyFormat),
             ("testPackUnpackNetworkOrder", testPackUnpackNetworkOrder),
         ]
     }
